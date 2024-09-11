@@ -44,7 +44,7 @@ We developed an interactive Shiny web app that allows users to:
 - Visualize energy consumption patterns using histograms and line charts.
 - Predict future energy demand based on user-defined environmental inputs.
 
-You can access the Shiny app [here](https://2fkohm-advait-narvekar.shinyapps.io/Project/)&#8203;:contentReference[oaicite:0]{index=0}.
+You can access the Shiny app [here](https://2fkohm-advait-narvekar.shinyapps.io/Project/)&#8203;
 
 ## Installation and Setup
 ### Requirements
