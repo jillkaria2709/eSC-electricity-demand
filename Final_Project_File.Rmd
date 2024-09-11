@@ -1,0 +1,388 @@
+---
+title: R Notebook
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+1. Loading packages
+```{r}
+#Downloading packages and loading them
+#install.packages(arrow)
+#install.packages(tidyverse)
+#install.packages(lubridate)
+#install.packages(naniar)
+library(arrow)
+library(tidyverse)
+library(lubridate)
+library(naniar)
+```
+
+2. Sourcing data by applying required transformations
+```{r}
+# This function is used to download all the csv or parquet files for different ids and then merge them together in a single dataframe
+# This function is used to download all the csv or parquet files for different ids and then merge them together in a single dataframe
+download_and_merge_dataframes <- function(column_values, base_url, file_type = "csv") {
+    # Initialize an empty list to store individual data frames
+    df_list <- list()
+    
+    # Loop through each value in the column
+    for (value in column_values) {
+        # Construct the URL based on the column value and the base URL
+        url <- paste0(base_url, value, ".", file_type)
+        
+        # Read and merge the data frame
+        if (file_type == "parquet") {
+            df <- read_parquet(url)
+        } else {
+            df <- read_csv(url)
+        }
+        
+        #Extracting only July month's data and transforming data set
+        if(file_type == "parquet") {
+            df <- df %>% filter(month(time) %in% c(7))
+            df$bldg_id <- value
+            df <- data.frame(total_energy_consumed = rowSums(df[,1:42]), time = df$time, bldg_id = df$bldg_id )
+            df <- df %>% mutate(hour = hour(time))
+            df <- df %>% select(-time)
+            df <- df %>% group_by(bldg_id,hour) %>% summarise(mean_total_energy_consumed = mean(total_energy_consumed))
+        }
+        else {
+            df <- df %>% filter(month(date_time) %in% c(7))
+            df$in.county <- value
+            df <- df %>% mutate(hour=hour(date_time))
+            df <- df %>% select(-date_time)
+            df <- df %>% group_by(in.county, hour) %>% summarise(across(everything(), mean))
+            
+        }
+        
+        # Append the data frame to the list
+        df_list <- append(df_list, list(df))
+        
+        # Remove the data frame from memory to free up space
+        rm(df)
+        
+        # Print a message indicating progress
+        cat("Processed:", value, "\n")
+    }
+    
+    # Merge all data frames in the list into a single data frame
+    merged_df <- bind_rows(df_list)
+    
+    # Remove the list from memory
+    rm(df_list)
+    
+    # Return the merged data frame
+    return(merged_df)
+}
+
+```
+
+```{r}
+#Downloading and initializing static house data
+static_house_data <- as.data.frame(read_parquet('https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet'))
+
+#Downloading and initializing meta data
+meta_data <- read.csv(url('https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/data_dictionary.csv'))
+
+#Downloading and initializing energy data based on bldg_id from static house data
+energy_data <- download_and_merge_dataframes(unique(static_house_data$bldg_id), "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/", file_type="parquet")
+
+#Downloading and initializing weather data based on in.county from static house data
+weather_data <- download_and_merge_dataframes(unique(static_house_data[,'in.county']), "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/", file_type="csv")
+
+
+#Creating a single dataframe by merging energy, static house data and weather
+merged_energy_house <- merge(static_house_data, energy_data,by.x = 'bldg_id',by.y = 'bldg_id')
+complete_data <- merge(merged_energy_house, weather_data, by.x = c('in.county','hour'), by.y = c('in.county','hour'))
+complete_data <- complete_data %>% arrange(bldg_id, hour)
+
+#complete_data <- read_csv("/Users/JILL/Downloads/complete_data.csv")
+```
+
+3. Cleaning data and relevant column selection
+```{r}
+#Changing column names to make them more accessible
+colnames(complete_data) <- make.names(colnames(complete_data))
+
+#Creating a list to store columns that didn't have more than one factors
+rm_col_list <- c()
+
+#Removing the outcome column name
+columns <- colnames(complete_data)
+columns <- columns[!columns %in% 'mean_total_energy_consumed']
+
+for (i in columns){
+    tryCatch(
+        summary(lm(mean_total_energy_consumed ~ .,data = complete_data[,c('mean_total_energy_consumed',i)])),
+    error = function(e){
+        rm_col_list <<- c(rm_col_list, i)
+    })
+}
+
+#Creating a backup of complete data for future use
+complete_data_bkp <- complete_data
+```
+
+4. Transforming the data set by selecting specific columns and cleaning the data set to get rid of Null Values
+```{r}
+#Converting None values to Null values to amke it feasible to remove empty spaces in data
+complete_data <- complete_data %>% replace_with_na(replace = list(x = c('None')))
+
+#Deleting the columns that has only one factor or max amount of null values
+temp_complete_data <- complete_data %>% select(-all_of(rm_col_list))
+
+```
+
+
+```{r}
+#Now checking the p-value for all remaining individual columns and rejecting them if they don't satisfy alpha level = 0.05
+
+reject_list = c()
+
+#Removing the outcome column name
+columns <- colnames(temp_complete_data)
+columns <- columns[!columns %in% 'mean_total_energy_consumed']
+
+for(i in columns){
+    a = lm(mean_total_energy_consumed ~ .,data = temp_complete_data[,c('mean_total_energy_consumed',i)] )
+    pVal <- anova(a)$'Pr(>F)'[1]
+    if(pVal>0.05 | is.na(pVal)==TRUE){
+        reject_list <- c(reject_list,i)
+    }
+}
+
+#Removing columns which has only one value or one value and null values
+delete_list = c()
+col <- colnames(temp_complete_data)
+col <- col[!col=='mean_total_energy_consumed']
+for(i in col){
+    if (nrow(unique(temp_complete_data[,i]))<=3 ){
+        delete_list = c(delete_list, i)
+    }
+    tryCatch(    
+        if(any(unique(temp_complete_data[,i]) == 'None'))
+            delete_list = c(delete_list, i)
+        ,
+        error = function(e){
+            e
+        }
+    )
+}
+
+
+#Deleting the rejected columns since there p-value is greater than 0.05
+#Removing in.county, in.count_and_puma and bldg_id columns since they are use to uniquely identify each row
+unique_cols <- c('in.county', 'in.county_and_puma', 'bldg_id')
+temp2_complete_data <- temp_complete_data %>% select(-all_of(c(reject_list,unique_cols,delete_list) ))
+```
+
+5. Checking the R-squared value of data set with remaining columns
+```{r}
+#Checking if the regression model fits
+summary(lm(mean_total_energy_consumed ~ .,data = temp2_complete_data))
+```
+6. To improve the R-squared value adding columns from rejected list with the existing columns
+```{r}
+#Selection of columns from rejected list to improve the R-squared
+new_accepted_columns <- c()
+accepted_cols = colnames(temp2_complete_data)
+for(i in reject_list){
+    a = summary(lm(mean_total_energy_consumed ~ .,data = temp_complete_data[,c(accepted_cols,i)] ))
+#Greater than 87% to improve the r squared value and less than 91% to avoid overfitting
+    if(a$r.squared>0.87 & a$r.squared<0.91){
+        new_accepted_columns <- c(new_accepted_columns,i)
+    }
+}
+
+#Creating transformed_data table
+transformed_data <- complete_data %>% select(c(new_accepted_columns,accepted_cols))
+```
+
+
+8. Creating a linear regression model on transformed data
+```{r}
+#Creating a train and test data sets
+set.seed(1)
+row.number <- sample(1:nrow(transformed_data), 0.95*nrow(transformed_data))
+summary(transformed_data)
+train = transformed_data[row.number,]
+test = transformed_data[-row.number,]
+
+str(transformed_data)
+#Checking out there dimensions
+dim(train)
+dim(test)
+
+one_dim_test <- head(test,1)
+
+one_dim_test_increased_temp <- one_dim_test
+one_dim_test_increased_temp$Dry.Bulb.Temperature...C. <-  one_dim_test_increased_temp$Dry.Bulb.Temperature...C. + 5 
+#Creating a model using linear regression
+model.lm <- lm(mean_total_energy_consumed ~ .,data = train )
+
+#Checking out the details of the model
+summary(model.lm)
+
+#Checking out the accuracy of the model by predicting values for test data set
+predicted_output <- predict(model.lm, newdata = one_dim_test)
+predicted_output_f <- predict(model.lm, newdata = one_dim_test_increased_temp)
+predicted_output
+predicted_output_f
+```
+
+Trying random forest model and finding its accuracy
+```{r}
+# install.packages("randomForest")
+library(randomForest)
+library(caret)
+
+# Split the data into training and testing sets
+sample_index <- sample(1:nrow(transformed_data), 0.7 * nrow(transformed_data))
+train_data <- transformed_data[sample_index, ]
+test_data <- transformed_data[-sample_index, ]
+
+# Build the random forest model
+rf_model <- randomForest(mean_total_energy_consumed ~ ., data = train_data)
+
+# Make predictions on the test set
+predictions <- predict(rf_model, test_data)
+# Calculate R-squared using the caret package
+rsquared <- R2(predictions, test_data$mean_total_energy_consumed)
+cat("R-squared:", rsquared, "\n")
+#we skip this because of overfitting
+```
+
+Trying Decision Tree
+```{r}
+# install.packages("rpart")
+library(rpart)
+# Train a decision tree model
+tree_model <- rpart(mean_total_energy_consumed ~ ., data = transformed_data)
+# Make predictions
+predictions <- predict(tree_model)
+
+rsquared <- cor(predictions, transformed_data$mean_total_energy_consumed)^2
+rsquared
+#the model is overfitted
+```
+
+Visualizations and EDA
+```{r}
+sh <- as.data.frame(read_parquet("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet"))
+
+library(maps)
+library(ggplot2)
+
+sc_map <- map_data("state", region = "south carolina")
+nc_map <- map_data("state", region = "north carolina")
+#mapping the counties on both north and south carolina map
+ggplot() +
+  geom_polygon(data = sc_map, aes(x = long, y = lat, group = group), fill = "lightblue", color = "black") +
+  geom_point(data = sh, aes(x = in.weather_file_longitude, y = in.weather_file_latitude), size=1, color = "black") +
+  ggtitle("South Carolina Map")
+ggplot() +
+  geom_polygon(data = nc_map, aes(x = long, y = lat, group = group), fill = "lightblue", color = "black") +
+  geom_point(data = sh, aes(x = in.weather_file_longitude, y = in.weather_file_latitude), size=1, color = "black") +
+  ggtitle("North Carolina Map")
+
+# Most houses come with around three bedrooms.
+summary(sh$in.bedrooms)
+hist(sh$in.bedrooms)
+
+# While the median square footage of houses in South Carolina is 1690,
+# the mean of 2114 shows that there is a pressence of outliers, which is also confirmed by the histogram.
+summary(sh$in.sqft)
+hist(sh$in.sqft)
+
+# We see that majority of houses are heated using electricity With the natural gas being the second most common fuel.
+summary(as.factor(sh$in.heating_fuel))
+
+# We see a mean occupancy of 2.5 with a range between one to nine.
+summary(as.numeric(sh$in.occupants))
+hist(as.numeric(sh$in.occupants))
+
+# Most buildings range between one to three stories.
+summary(sh$in.geometry_stories)
+hist(sh$in.geometry_stories)
+
+table(sh$in.vacancy_status)
+
+table(sh$in.income)
+```
+
+More visualizations
+```{r}
+# Use group_by and summarize to find the maximum value for each hour
+max_values <- transformed_data %>%
+  group_by(hour) %>%
+  summarize(max_value = max(mean_total_energy_consumed, na.rm = TRUE))
+
+# Load necessary libraries
+library(ggplot2)
+
+# Convert 'hour' column to numeric if needed
+max_values$hour <- as.numeric(max_values$hour)
+
+# Create a line chart
+ggplot(max_values, aes(x = hour, y = max_value)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  labs(title = "Maximum Energy Consumption by Hour", x = "Hour", y = "Maximum Energy Consumption") + theme_minimal()
+```
+
+```{r}
+#linear relative and it is a positive correlation
+# Create scatterplot with ggplot2
+ggplot(transformed_data, aes(x = Dry.Bulb.Temperature...C., y = mean_total_energy_consumed)) +
+  geom_point(color = "blue", size = 1) +
+  labs(
+    title = "Scatterplot of Temperature vs Energy consumed",
+    x = "Temperature",
+    y = "Energy Consumed"
+  )
+
+```
+
+
+```{r}
+#linear relative but it is a negetive correlation
+# Create scatterplot with ggplot2
+ggplot(transformed_data, aes(x = Relative.Humidity...., y = mean_total_energy_consumed)) +
+  geom_point(color = "blue", size = 1) +
+  labs(
+    title = "Scatterplot of Humidity vs Energy consumed",
+    x = "Humidity",
+    y = "Energy Consumed"
+  )
+
+```
+
+
+```{r}
+# Create line chart with ggplot2
+ggplot(transformed_data, aes(x = mean_total_energy_consumed)) +
+  geom_line(aes(y = Relative.Humidity...., color = "blue"), linewidth = 0.5) +
+  geom_line(aes(y = Dry.Bulb.Temperature...C., color = "red"), linewidth = 0.5) +
+  labs(
+    title = "Line Chart of Bulb and Temperature Over Energy Consumed",
+    x = "Energy Consumed",
+    y = "Value"
+  )
+```
+
+
+```{r}
+# Create line chart with ggplot2
+ggplot(transformed_data, aes(x = hour)) +
+  geom_line(aes(y = Relative.Humidity...., color = "blue"), linewidth = 0.5) +
+  geom_line(aes(y = Dry.Bulb.Temperature...C., color = "red"), linewidth = 0.5) +
+  labs(
+    title = "Line Chart of Bulb and Temperature Over Hour",
+    x = "Energy Consumed",
+    y = "Value"
+  )
+```
+
